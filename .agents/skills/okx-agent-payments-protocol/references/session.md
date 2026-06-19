@@ -4,7 +4,7 @@
 >
 > **Also enter this reference for any mid-session operation** (close / topUp / settle / voucher / refund) when the user mentions an existing `channel_id`, even without a fresh 402. Jump directly to the matching phase below.
 
-State machine: **open → N vouchers → close**, optional **topUp** between vouchers. The seller drives transitions via fresh 402 challenges (or the user issues a close).
+State machine: **open → N vouchers → close**, with optional **topUp** between vouchers. Each phase has its own CLI command and the seller drives transitions via fresh 402 challenges (or the user explicitly issues a close).
 
 **TEE-only** — local private key signing is NOT supported on this path. If the wallet session is unavailable and the user can't log in, stop.
 
@@ -67,7 +67,7 @@ Track in conversation context. Across conversations, ask the user to re-supply `
 
 > 📋 Channel `<channel_id>` · chain `<chain_id>` · escrow `<escrow>` · deposit `<human(deposit)>` (`<deposit>`) · cum `<human(current_cum)>` (`<current_cum>`) · spent~`<human(estimated_spent)>` (`<estimated_spent>`) · sig `<current_sig prefix...>`
 
-**All user-facing amounts in BOTH human and atomic form** — `<human> (<atomic>)`; see `../_shared/amount-display.md` for the decimals table + fallback.
+**All user-facing amounts in BOTH human and atomic form** — `<human> (<atomic>)`, e.g. `0.0004 USDC (400)`. Compute via `amount / 10^decimals` from `currency` (typically 6 for USDC/USD₮, 18 for native — never assume; query `okx-dex-token` if uncertain).
 
 ---
 
@@ -225,7 +225,7 @@ Other rejections: `amount_exceeds_deposit` → topup (S2b); `delta_too_small` �
 
 Repeat S2.1–S2.4 for each request. Same voucher funds many calls while `remaining ≥ unit_amount`; re-sign only when balance runs out.
 
-> Voucher rejections come from **seller-SDK local validation**, not a backend round-trip (the `700xx` codes are in Troubleshooting below).
+> Voucher rejections come from **seller-SDK local validation**, not a backend round-trip. Common: `70000` (cum not increasing), `70004` (invalid signature), `70012` (amount > deposit), `70013` (delta too small), plus `InsufficientBalance` (mppx/OKX TS typed; OKX Rust SDK private `70015`).
 
 ---
 
@@ -303,7 +303,13 @@ CLI signs an EIP-712 Voucher(channelId, final_cum) via TEE — same signing path
 Authorization: <authorization_header>
 ```
 
-Seller settles on-chain (transfers `final_cum` to merchant, refunds the rest to payer) and returns a `Payment-Receipt` header. Decode it locally (`echo '<value>' | base64 -d | jq .`) — 关键字段：`status` / `transaction`（on-chain tx hash，S3.4 报给用户用）/ `chainId`。
+Seller settles on-chain (transfers `final_cum` to merchant, refunds the rest to payer) and returns a `Payment-Receipt` header (base64-encoded JSON). Decode with:
+
+```bash
+echo '<header value>' | base64 -d | jq .
+```
+
+关键字段：`status` / `transaction`（on-chain tx hash，S3.4 报给用户用）/ `chainId`。
 
 **Clear session state** — channel is closed.
 
@@ -316,7 +322,9 @@ Seller settles on-chain (transfers `final_cum` to merchant, refunds the rest to 
 
 ## Reading seller errors
 
-Use **`../SKILL.md` → "Reading seller errors"** (priority order + `❌ Seller rejected: <reason> (code <code>, HTTP <status>)` format).
+Same priority order as charge (see `charge.md`). Always extract `body.reason` → `body.detail` → `body.message` → `body.msg` → `body.error` → `body.title` → fallthrough. Format:
+
+> ❌ Seller rejected: `<reason text>` (code `<code if present>`, HTTP `<status>`)
 
 ## Troubleshooting
 
@@ -335,3 +343,10 @@ Use **`../SKILL.md` → "Reading seller errors"** (priority order + `❌ Seller 
 | `70008 channel finalized` | Channel was already closed on-chain | Session is done; do not retry close |
 | `70010 channel not found` | Wrong channel_id, or seller has no record | Verify channel_id against open response |
 | Seller returns ETIMEOUT or hangs | SA backend down or slow | Wait + retry; SDK has 30s timeout |
+
+## Security notes
+
+- **TEE-only** — no local-key fallback on the `WWW-Authenticate: Payment` path.
+- **Always close sessions** — abandoned deposits stay escrowed until the on-chain timeout fires (12–24h).
+- **`cumulativeAmount` monotonically increases per channel** — never decrease or reuse across vouchers in the same session.
+- **`channelId` is deterministic** — `keccak256(abi.encode(payer, payee, token, salt, authorizedSigner, escrow, chainId))`; identical params produce duplicates and the contract rejects them.
